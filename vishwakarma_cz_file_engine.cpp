@@ -18,7 +18,7 @@ using u32 = std::uint32_t;
 using u64 = std::uint64_t;
 using u8  = std::uint8_t;
 
-enum class Transition : std::uint8_t { Sequential, CZ, Cross, DPZ, Pi, NanoBytes };
+enum class Transition : std::uint8_t { Sequential, CZ, Cross, DPZ, Pi, NanoBytes, ViorBinary };
 enum class DPZType : std::uint8_t { Normal, Manifest, Latent, Field, Primed, Absorbed, Origin };
 
 struct DPZValue {
@@ -327,6 +327,31 @@ public:
         return true;
     }
 
+    // ViorBinary: treats incoming binary bit (0 or 1) as a direct behavior stimulus
+    // resolved through CZ differential dynamics + behavior routing.
+    i64 applyBinaryBehavior(int bit) {
+        const int b = (bit != 0) ? 1 : 0;
+        const i64 prevState = s.boundedState;
+        const int routed = s.behavior[static_cast<std::size_t>(prevState % 4)];
+
+        if (b == 1) {
+            s.plusVector = 1 + routed;
+            s.minusVector = 0;
+            s.boundedState = mod10(prevState + s.plusVector * s.alpha - s.gamma * prevState);
+        } else {
+            s.plusVector = 0;
+            s.minusVector = 1 + (1 - routed);
+            s.boundedState = mod10(prevState - s.minusVector * s.beta - s.gamma * prevState);
+        }
+
+        s.deltaState = s.boundedState - prevState;
+        s.equilibriumError = s.plusVector - s.minusVector;
+        s.equilibrium = (s.equilibriumError == 0);
+        s.transition = Transition::ViorBinary;
+        finalize();
+        return s.boundedState;
+    }
+
     const State& inspect() const { return s; }
     u32 token() const { return s.token; }
 };
@@ -543,30 +568,102 @@ public:
         auto r=invoke(c); if(!r.accepted) return false;
         std::copy(r.bytes.begin(),r.bytes.end(),output); return true;
     }
+
+    i64 viorBinaryBit(int bit) {
+        return core_.applyBinaryBehavior(bit);
+    }
+
     const State& inspect() const { return core_.inspect(); }
     u32 token() const { return core_.token(); }
 };
 
+class ViorBinary {
+public:
+    struct Summary {
+        u64 totalBytes = 0;
+        u64 zeroBits = 0;
+        u64 oneBits = 0;
+        i64 finalState = 0;
+        u32 finalToken = 0;
+    };
+
+    static void feedChunkBits(Runtime& rt, const u8* data, std::size_t len, Summary& ioSummary) {
+        for (std::size_t i = 0; i < len; ++i) {
+            const u8 byte = data[i];
+            ++ioSummary.totalBytes;
+
+            for (int bitPos = 7; bitPos >= 0; --bitPos) {
+                const int bit = (byte >> bitPos) & 1;
+                if (bit == 0) ++ioSummary.zeroBits;
+                else ++ioSummary.oneBits;
+                rt.viorBinaryBit(bit);
+            }
+
+            const auto& st = rt.inspect();
+            const u32 nextSeed = 0x13570000u ^ (st.token << 4) ^ static_cast<u32>(byte);
+            rt.configureNanoBytes(nextSeed, st.nanoScaleQ16, st.nanoOffsetQ16);
+        }
+        const auto& finalSt = rt.inspect();
+        ioSummary.finalState = finalSt.boundedState;
+        ioSummary.finalToken = finalSt.token;
+    }
+
+    static bool runFile(const std::string& inputPath, Summary& outSummary) {
+        std::ifstream fin(inputPath, std::ios::binary);
+        if (!fin) {
+            std::cerr << "Failed to open input file for ViorBinary: " << inputPath << "\n";
+            return false;
+        }
+
+        Runtime rt;
+        rt.reset();
+        rt.setCZCoefficients(1, 1, 0);
+        rt.configurePi(1.0L, 1.0L);
+
+        outSummary = Summary{};
+        std::vector<u8> buf(65536);
+
+        while (fin) {
+            fin.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(buf.size()));
+            const auto got = static_cast<std::size_t>(fin.gcount());
+            if (got == 0) break;
+            feedChunkBits(rt, buf.data(), got, outSummary);
+        }
+
+        const auto& finalSt = rt.inspect();
+        std::cout << "=== ViorBinary Stream Result ===\n"
+                  << "Input File   : " << inputPath << "\n"
+                  << "Bytes Read   : " << outSummary.totalBytes << "\n"
+                  << "Zero Bits (0): " << outSummary.zeroBits << "\n"
+                  << "One Bits  (1): " << outSummary.oneBits << "\n"
+                  << "Final State  : " << outSummary.finalState << "\n"
+                  << "Behavior     : [" << finalSt.behavior[0] << "," << finalSt.behavior[1] << ","
+                  << finalSt.behavior[2] << "," << finalSt.behavior[3] << "]\n"
+                  << "Equilibrium  : " << (finalSt.equilibrium ? "true" : "false") << "\n"
+                  << "Final Token  : 0x" << std::hex << std::setw(8) << std::setfill('0')
+                  << outSummary.finalToken << std::dec << "\n";
+        return true;
+    }
+};
+
 // ============================================================
-// STATE + NANO-BYTES REVERSIBLE CZ FILE CONTAINER (.cz)
-// Header (36 bytes):
-//   [0..3]   Magic: "CZF1"
+// VIORBINARY + STATE + NANO-BYTES REVERSIBLE CZ CONTAINER (.cz)
+// Header (56 bytes):
+//   [0..3]   Magic: "CZF2"
 //   [4..11]  Original file size (u64 little-endian)
 //   [12..19] Chunk size used during pack (u64 little-endian)
-//   [20..23] Seed Q16.16 (u32 little-endian)
-//   [24..27] Scale Q16.16 (u32 little-endian)
-//   [28..31] Offset Q16.16 (u32 little-endian)
+//   [20..23] Initial Seed Q16.16 (u32 little-endian)
+//   [24..27] Initial Scale Q16.16 (u32 little-endian)
+//   [28..31] Initial Offset Q16.16 (u32 little-endian)
 //   [32..35] Original file FNV-1a 32-bit checksum (u32 little-endian)
-//
-// Each Chunk Record:
-//   [0..3]   Stored payload length (u32 little-endian)
-//   [4]      Mode flag: 0 = raw state-masked bytes, 1 = RLE-packed masked bytes
-//   [5..]    Payload bytes
+//   [36..43] ViorBinary zero-bit count (u64 little-endian)
+//   [44..51] ViorBinary one-bit count (u64 little-endian)
+//   [52..55] ViorBinary final token (u32 little-endian)
 // ============================================================
 class CZFilePipeline {
     static constexpr u32 FNV_OFFSET = 2166136261u;
     static constexpr u32 FNV_PRIME  = 16777619u;
-    static constexpr std::size_t DEFAULT_CHUNK = 65536; // 64 KiB (fits cleanly in NanoRead limit)
+    static constexpr std::size_t DEFAULT_CHUNK = 65536;
 
     static u32 fnvUpdate(u32 h, const u8* data, std::size_t len) {
         for (std::size_t i = 0; i < len; ++i) {
@@ -613,14 +710,13 @@ class CZFilePipeline {
         return true;
     }
 
-    // Advance state + Nano-Bytes mask for a chunk of size `len`
     static std::vector<u8> stepNanoMask(Runtime& rt, u64 chunkIdx, std::size_t len) {
         const i64 stateVal = rt.czProcess(static_cast<i64>(chunkIdx + 1), 1);
         rt.piStep(0.01L);
         const u32 tok = rt.token();
-        const u32 seed = 0x13570000u ^ (tok << 8) ^ static_cast<u32>(stateVal);
-        const u32 scale = 0x00A40000u ^ (static_cast<u32>(chunkIdx) << 12);
-        const u32 offset = 0x00550000u ^ (tok >> 4);
+        const u32 seed = rt.inspect().nanoSeedQ16 ^ (tok << 8) ^ static_cast<u32>(stateVal);
+        const u32 scale = rt.inspect().nanoScaleQ16 ^ (static_cast<u32>(chunkIdx) << 12);
+        const u32 offset = rt.inspect().nanoOffsetQ16 ^ (tok >> 4);
         rt.configureNanoBytes(seed, scale, offset);
 
         std::vector<u8> mask(len);
@@ -631,7 +727,6 @@ class CZFilePipeline {
         return mask;
     }
 
-    // Reversible RLE over state-masked bytes (shrinks repeated/zero runs; keeps raw if larger)
     static std::pair<u8, std::vector<u8>> encodeMaskedChunk(const std::vector<u8>& masked) {
         std::vector<u8> rle;
         rle.reserve(masked.size());
@@ -686,13 +781,22 @@ public:
         const u64 origSize = static_cast<u64>(fin.tellg());
         fin.seekg(0, std::ios::beg);
 
-        // Compute original FNV-1a checksum in streaming fashion
+        // First streaming pass: compute original FNV-1a + ViorBinary bit-behavior signature
+        Runtime sigRt;
+        sigRt.reset();
+        sigRt.setCZCoefficients(1, 1, 0);
+        sigRt.configurePi(1.0L, 1.0L);
+
         u32 origHash = FNV_OFFSET;
+        ViorBinary::Summary viorSummary{};
         std::vector<u8> scanBuf(DEFAULT_CHUNK);
         while (fin) {
             fin.read(reinterpret_cast<char*>(scanBuf.data()), static_cast<std::streamsize>(scanBuf.size()));
             const auto got = static_cast<std::size_t>(fin.gcount());
-            if (got > 0) origHash = fnvUpdate(origHash, scanBuf.data(), got);
+            if (got > 0) {
+                origHash = fnvUpdate(origHash, scanBuf.data(), got);
+                ViorBinary::feedChunkBits(sigRt, scanBuf.data(), got, viorSummary);
+            }
         }
         fin.clear();
         fin.seekg(0, std::ios::beg);
@@ -709,21 +813,26 @@ public:
         rt.configurePi(1.0L, 1.0L);
 
         const auto& st = rt.inspect();
-        fout.write("CZF1", 4);
+        fout.write("CZF2", 4);
         writeU64(fout, origSize);
         writeU64(fout, static_cast<u64>(DEFAULT_CHUNK));
         writeU32(fout, st.nanoSeedQ16);
         writeU32(fout, st.nanoScaleQ16);
         writeU32(fout, st.nanoOffsetQ16);
         writeU32(fout, origHash);
+        writeU64(fout, viorSummary.zeroBits);
+        writeU64(fout, viorSummary.oneBits);
+        writeU32(fout, viorSummary.finalToken);
 
         u64 chunkIdx = 0;
+        ViorBinary::Summary packBits{};
         std::vector<u8> inBuf(DEFAULT_CHUNK);
         while (fin) {
             fin.read(reinterpret_cast<char*>(inBuf.data()), static_cast<std::streamsize>(inBuf.size()));
             const auto got = static_cast<std::size_t>(fin.gcount());
             if (got == 0) break;
 
+            ViorBinary::feedChunkBits(rt, inBuf.data(), got, packBits);
             const std::vector<u8> mask = stepNanoMask(rt, chunkIdx, got);
             std::vector<u8> masked(got);
             for (std::size_t i = 0; i < got; ++i) {
@@ -739,12 +848,14 @@ public:
         }
 
         fout.flush();
-        fin.seekg(0, std::ios::end);
         const u64 czSize = static_cast<u64>(std::ifstream(outputCzPath, std::ios::binary | std::ios::ate).tellg());
         std::cout << "Packed '" << inputPath << "' -> '" << outputCzPath << "'\n"
                   << "Original Bytes : " << origSize << "\n"
                   << "CZ Bytes       : " << czSize << "\n"
                   << "Chunks         : " << chunkIdx << "\n"
+                  << "Vior 0/1 Bits  : " << viorSummary.zeroBits << " / " << viorSummary.oneBits << "\n"
+                  << "Vior Token     : 0x" << std::hex << std::setw(8) << std::setfill('0')
+                  << viorSummary.finalToken << std::dec << "\n"
                   << "FNV-1a Hash    : 0x" << std::hex << origHash << std::dec << "\n";
         return true;
     }
@@ -757,13 +868,15 @@ public:
         }
 
         char magic[4]{};
-        u64 origSize = 0, chunkSize64 = 0;
-        u32 seed = 0, scale = 0, offset = 0, origHash = 0;
+        u64 origSize = 0, chunkSize64 = 0, hdrZeroBits = 0, hdrOneBits = 0;
+        u32 seed = 0, scale = 0, offset = 0, origHash = 0, hdrViorToken = 0;
 
-        if (!fin.read(magic, 4) || std::string(magic, 4) != "CZF1" ||
+        if (!fin.read(magic, 4) || std::string(magic, 4) != "CZF2" ||
             !readU64(fin, origSize) || !readU64(fin, chunkSize64) ||
             !readU32(fin, seed) || !readU32(fin, scale) ||
-            !readU32(fin, offset) || !readU32(fin, origHash)) {
+            !readU32(fin, offset) || !readU32(fin, origHash) ||
+            !readU64(fin, hdrZeroBits) || !readU64(fin, hdrOneBits) ||
+            !readU32(fin, hdrViorToken)) {
             std::cerr << "Invalid or truncated .cz header\n";
             return false;
         }
@@ -783,6 +896,7 @@ public:
         u64 chunkIdx = 0;
         u32 recLen = 0;
         u32 restoredHash = FNV_OFFSET;
+        ViorBinary::Summary restoredVior{};
 
         while (readU32(fin, recLen)) {
             char modeChar = 0;
@@ -798,7 +912,10 @@ public:
 
             const std::size_t expectedChunkLen = static_cast<std::size_t>(
                 std::min<u64>(chunkSize64, origSize - writtenTotal));
+            ViorBinary::Summary preChunkBits = restoredVior;
             const std::vector<u8> mask = stepNanoMask(rt, chunkIdx, expectedChunkLen);
+            restoredVior = preChunkBits;
+
             const std::vector<u8> masked = decodeMaskedChunk(static_cast<u8>(modeChar), payload, expectedChunkLen);
 
             std::vector<u8> origChunk(expectedChunkLen);
@@ -806,6 +923,7 @@ public:
                 origChunk[i] = static_cast<u8>(masked[i] ^ mask[i]);
             }
 
+            ViorBinary::feedChunkBits(rt, origChunk.data(), origChunk.size(), restoredVior);
             fout.write(reinterpret_cast<const char*>(origChunk.data()),
                        static_cast<std::streamsize>(origChunk.size()));
             restoredHash = fnvUpdate(restoredHash, origChunk.data(), origChunk.size());
@@ -816,12 +934,18 @@ public:
         fout.flush();
         const bool sizeOk = (writtenTotal == origSize);
         const bool hashOk = (restoredHash == origHash);
+        const bool viorOk = (restoredVior.zeroBits == hdrZeroBits) &&
+                            (restoredVior.oneBits == hdrOneBits) &&
+                            (restoredVior.finalToken == hdrViorToken);
 
         std::cout << "Restored '" << inputCzPath << "' -> '" << restoredPath << "'\n"
                   << "Restored Bytes : " << writtenTotal << " / " << origSize << "\n"
+                  << "Vior 0/1 Bits  : " << restoredVior.zeroBits << " / " << restoredVior.oneBits << "\n"
+                  << "Vior Token     : 0x" << std::hex << std::setw(8) << std::setfill('0')
+                  << restoredVior.finalToken << std::dec << "\n"
                   << "FNV-1a Hash    : 0x" << std::hex << restoredHash << std::dec << "\n"
-                  << "Integrity Match: " << (sizeOk && hashOk ? "PASS" : "FAIL") << "\n";
-        return sizeOk && hashOk;
+                  << "Integrity Match: " << (sizeOk && hashOk && viorOk ? "PASS" : "FAIL") << "\n";
+        return sizeOk && hashOk && viorOk;
     }
 };
 
@@ -863,6 +987,11 @@ int main(int argc, char** argv) {
     using namespace vcore;
     vme::Runtime engine;
 
+    if (argc == 3 && std::string(argv[1]) == "--vior-binary") {
+        vme::ViorBinary::Summary summary{};
+        return vme::ViorBinary::runFile(argv[2], summary) ? 0 : 1;
+    }
+
     if (argc == 4 && std::string(argv[1]) == "--pack") {
         return vme::CZFilePipeline::packFile(argv[2], argv[3]) ? 0 : 1;
     }
@@ -901,6 +1030,7 @@ int main(int argc, char** argv) {
     if (argc != 1) {
         std::cerr << "Usage:\n"
                   << "  " << argv[0] << "\n"
+                  << "  " << argv[0] << " --vior-binary INPUT_FILE\n"
                   << "  " << argv[0] << " --nano-read OFFSET LENGTH\n"
                   << "  " << argv[0] << " --pack INPUT_FILE OUTPUT.cz\n"
                   << "  " << argv[0] << " --unpack INPUT.cz RESTORED_FILE\n";
