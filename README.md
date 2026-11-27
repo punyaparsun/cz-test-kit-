@@ -29,7 +29,7 @@ chmod +x build.sh run_test.sh
 
 
 
-2. Test on Your Own File (e.g., 300 MB or movie.mp4)
+2. Test on Your Own File (e.g., 300 MB or ANY FILE )
 
 ./test_run.sh ./vishwakarma_cz_engine /path/to/your_file.mp4
 
