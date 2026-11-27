@@ -15,7 +15,6 @@ CLEANUP_INPUT=0
 
 if [[ -z "$INPUT_FILE" ]]; then
   INPUT_FILE="$WORK_DIR/sample_test.bin"
-  # Create a mixed pattern + zero-run test file (16 MiB)
   python3 - "$INPUT_FILE" <<'PY'
 import sys
 path = sys.argv[1]
@@ -29,36 +28,64 @@ fi
 
 BASE_NAME="$(basename "$INPUT_FILE")"
 CZ_FILE="$WORK_DIR/${BASE_NAME}.cz"
-RESTORED_FILE="$WORK_DIR/restored_${BASE_NAME}"
+RESTORED_FILE="$WORK_DIR/${BASE_NAME}.restored"
+TELEMETRY_LOG="$WORK_DIR/runtime_load.log"
 
-echo "=== 1. Baseline File Info ==="
-ls -lh "$INPUT_FILE"
-sha256sum "$INPUT_FILE"
+measure_stage() {
+  local label="$1"
+  shift
+  local t_file
+  t_file="$(mktemp)"
 
-echo ""
-echo "=== 2. Pack to .cz ==="
-time "$BIN_FILE" --pack "$INPUT_FILE" "$CZ_FILE"
-ls -lh "$INPUT_FILE" "$CZ_FILE"
+  local start_ns end_ns
+  start_ns=$(date +%s%N)
 
-echo ""
-echo "=== 3. Unpack / Restore ==="
-time "$BIN_FILE" --unpack "$CZ_FILE" "$RESTORED_FILE"
+  if command -v /usr/bin/time >/dev/null 2>&1; then
+    /usr/bin/time -f "user=%U sys=%S max_rss_kb=%M" -o "$t_file" "$@"
+  else
+    { time "$@" ; } 2>"$t_file"
+  fi
 
-echo ""
-echo "=== 4. SHA-256 Verification ==="
-ORIG_HASH="$(sha256sum "$INPUT_FILE" | awk '{print $1}')"
-REST_HASH="$(sha256sum "$RESTORED_FILE" | awk '{print $1}')"
-echo "Original SHA-256 : $ORIG_HASH"
-echo "Restored SHA-256 : $REST_HASH"
+  end_ns=$(date +%s%N)
+  local elapsed_ms=$(( (end_ns - start_ns) / 1000000 ))
 
-if [[ "$ORIG_HASH" == "$REST_HASH" ]]; then
-  echo "RESULT: PASS (Bit-for-bit restoration verified)"
-else
-  echo "RESULT: FAIL (Hash mismatch)"
-  exit 1
-fi
+  echo "[$label] Wall Time: ${elapsed_ms} ms"
+  sed 's/^/  /' "$t_file"
+  rm -f "$t_file"
+}
 
-if [[ "$CLEANUP_INPUT" -eq 1 ]]; then
+{
+  echo "=== CZ Runtime Load & Data Read/Write Report ==="
+  echo "Input File : $INPUT_FILE"
+  echo "Input Bytes: $(stat -c%s "$INPUT_FILE")"
+  sha256sum "$INPUT_FILE"
   echo ""
-  echo "Test artifacts saved in '$WORK_DIR'."
-fi
+
+  echo "=== 1. Pack / Send to .cz ==="
+  measure_stage "PACK/SEND" "$BIN_FILE" --pack "$INPUT_FILE" "$CZ_FILE"
+  ls -lh "$INPUT_FILE" "$CZ_FILE"
+  echo ""
+
+  echo "=== 2. Unpack / Restore ==="
+  measure_stage "UNPACK/RECV" "$BIN_FILE" --unpack "$CZ_FILE" "$RESTORED_FILE"
+  ls -lh "$CZ_FILE" "$RESTORED_FILE"
+  echo ""
+
+  echo "=== 3. SHA-256 Verification ==="
+  ORIG_HASH="$(sha256sum "$INPUT_FILE" | awk '{print $1}')"
+  REST_HASH="$(sha256sum "$RESTORED_FILE" | awk '{print $1}')"
+  echo "Original SHA-256 : $ORIG_HASH"
+  echo "Restored SHA-256 : $REST_HASH"
+
+  if [[ "$ORIG_HASH" == "$REST_HASH" ]]; then
+    echo "RESULT: PASS (Bit-for-bit restoration verified)"
+  else
+    echo "RESULT: FAIL (Hash mismatch)"
+    exit 1
+  fi
+
+  if [[ "$CLEANUP_INPUT" -eq 1 ]]; then
+    echo ""
+    echo "Test artifacts saved in '$WORK_DIR'."
+  fi
+} | tee "$TELEMETRY_LOG"
