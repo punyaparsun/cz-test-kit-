@@ -1,5 +1,6 @@
 # Vishwakarma CZ + Nano-Bytes File Engine (Linux C++17)
 
+
 Standalone Linux-compatible C++17 reference prototype for `.cz` file packing, restoration (`--pack`, `--unpack`), deterministic `Nano-Bytes`, and `vcore` / `vme::Runtime` evaluation.
 
 ## Requirements
@@ -12,19 +13,19 @@ Standalone Linux-compatible C++17 reference prototype for `.cz` file packing, re
 sudo apt update
 sudo apt install -y build-essential
 
+
+chmod +x build.sh run_test.sh
+./build.sh vishwakarma_cz_file_engine.cpp ./vishwakarma_cz_engine
+./run_test.sh ./vishwakarma_cz_engine "/path/to/your_file" ./cz_test_out
+
+
+
 Build
 Give executable permissions to the scripts and compile the C++17 binary:
 
-chmod +x build.sh test_run.sh
-./build.sh
-
-
-Run Tests
-1. Quick Synthetic Test (No Input File Needed)
-Bash
-./test_run.sh
-
-
+chmod +x build.sh run_test.sh
+./build.sh vishwakarma_cz_file_engine.cpp ./vishwakarma_cz_engine
+./run_test.sh ./vishwakarma_cz_engine "/path/to/your_file" ./cz_test_out
 
 
 
