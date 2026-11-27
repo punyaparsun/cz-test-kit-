@@ -9,6 +9,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace vcore {
@@ -72,6 +73,7 @@ class BlackBox {
 private:
     static constexpr i64 MOD = 10;
     static constexpr u32 TOKEN_MIX = 0xA7C39E21u;
+    static constexpr std::uint64_t VIRTUAL_CAPACITY = 2048ULL * 512ULL;
     State s{};
 
     static constexpr std::array<std::array<int, 4>, 10> behaviorTable{{
@@ -135,6 +137,13 @@ private:
         s.transition = Transition::DPZ;
         if (v.isManifest) s.boundedState = mod10(v.scalar);
         finalize();
+    }
+
+    u8 nanoByteAt(std::uint64_t virtualIndex) const {
+        const u32 index32 = static_cast<u32>(virtualIndex);
+        u32 computed = s.nanoSeedQ16 + index32 * s.nanoScaleQ16;
+        computed >>= 16;
+        return static_cast<u8>((computed ^ (s.nanoOffsetQ16 >> 16)) & 0xffu);
     }
 
 public:
@@ -295,17 +304,7 @@ public:
         finalize();
     }
 
-    std::uint8_t nanoByteAt(std::uint64_t virtualIndex) const {
-        const u32 index32 = static_cast<u32>(virtualIndex);
-        u32 computed = s.nanoSeedQ16 + index32 * s.nanoScaleQ16;
-        computed >>= 16;
-        return static_cast<std::uint8_t>(
-            (computed ^ (s.nanoOffsetQ16 >> 16)) & 0xffu);
-    }
-
-    bool nanoRead(std::uint64_t offset, std::uint8_t* output,
-                  std::size_t length) {
-        constexpr std::uint64_t VIRTUAL_CAPACITY = 2048ULL * 512ULL;
+    bool nanoRead(std::uint64_t offset, u8* output, std::size_t length) {
         if (output == nullptr || offset > VIRTUAL_CAPACITY ||
             length > VIRTUAL_CAPACITY - offset) {
             return false;
@@ -313,7 +312,7 @@ public:
 
         u32 checksum = 2166136261u;
         for (std::size_t i = 0; i < length; ++i) {
-            const std::uint8_t byte = nanoByteAt(offset + i);
+            const u8 byte = nanoByteAt(offset + i);
             output[i] = byte;
             checksum ^= byte;
             checksum *= 16777619u;
@@ -327,8 +326,6 @@ public:
         return true;
     }
 
-    // ViorBinary: treats incoming binary bit (0 or 1) as a direct behavior stimulus
-    // resolved through CZ differential dynamics + behavior routing.
     i64 applyBinaryBehavior(int bit) {
         const int b = (bit != 0) ? 1 : 0;
         const i64 prevState = s.boundedState;
@@ -357,10 +354,6 @@ public:
 };
 
 namespace vme {
-using vcore::BlackBox;
-using vcore::State;
-using vcore::i64;
-using vcore::u32;
 
 enum class Op : std::uint8_t {
     Reset=1, Load, Next, Same, Opposite, Reinforce,
@@ -381,38 +374,38 @@ struct Command {
 struct Result {
     i64 value = 0;
     bool accepted = true;
-    std::vector<std::uint8_t> bytes;
+    std::vector<u8> bytes;
 };
 
 class MorsePacket {
-    static std::uint32_t hash(const std::vector<std::uint8_t>& v) {
-        std::uint32_t h = 2166136261u;
+    static u32 hash(const std::vector<u8>& v) {
+        u32 h = 2166136261u;
         for (auto b : v) { h ^= b; h *= 16777619u; }
         return h;
     }
-    static void put32(std::vector<std::uint8_t>& v, std::uint32_t x) {
-        for (unsigned i=0;i<4;++i) v.push_back(static_cast<std::uint8_t>(x>>(8*i)));
+    static void put32(std::vector<u8>& v, u32 x) {
+        for (unsigned i=0;i<4;++i) v.push_back(static_cast<u8>(x>>(8*i)));
     }
-    static void put64(std::vector<std::uint8_t>& v, std::uint64_t x) {
-        for (unsigned i=0;i<8;++i) v.push_back(static_cast<std::uint8_t>(x>>(8*i)));
+    static void put64(std::vector<u8>& v, u64 x) {
+        for (unsigned i=0;i<8;++i) v.push_back(static_cast<u8>(x>>(8*i)));
     }
-    static std::uint32_t get32(const std::vector<std::uint8_t>& v, std::size_t p) {
+    static u32 get32(const std::vector<u8>& v, std::size_t p) {
         if (p+4>v.size()) throw std::runtime_error("VME truncated u32");
-        std::uint32_t x=0; for(unsigned i=0;i<4;++i) x |= std::uint32_t(v[p+i])<<(8*i); return x;
+        u32 x=0; for(unsigned i=0;i<4;++i) x |= u32(v[p+i])<<(8*i); return x;
     }
-    static std::uint64_t get64(const std::vector<std::uint8_t>& v, std::size_t p) {
+    static u64 get64(const std::vector<u8>& v, std::size_t p) {
         if (p+8>v.size()) throw std::runtime_error("VME truncated u64");
-        std::uint64_t x=0; for(unsigned i=0;i<8;++i) x |= std::uint64_t(v[p+i])<<(8*i); return x;
+        u64 x=0; for(unsigned i=0;i<8;++i) x |= u64(v[p+i])<<(8*i); return x;
     }
 public:
-    static std::vector<std::uint8_t> serialize(const Command& c) {
+    static std::vector<u8> serialize(const Command& c) {
         if (c.text.size() > 65535) throw std::runtime_error("VME text field too large");
-        std::vector<std::uint8_t> v{'V','M','E',1};
+        std::vector<u8> v{'V','M','E',1};
         put32(v,c.sequence);
-        v.push_back(static_cast<std::uint8_t>(c.op));
-        for (auto x:c.arg) put64(v,static_cast<std::uint64_t>(x));
-        v.push_back(static_cast<std::uint8_t>(c.text.size() & 0xff));
-        v.push_back(static_cast<std::uint8_t>((c.text.size() >> 8) & 0xff));
+        v.push_back(static_cast<u8>(c.op));
+        for (auto x:c.arg) put64(v,static_cast<u64>(x));
+        v.push_back(static_cast<u8>(c.text.size() & 0xff));
+        v.push_back(static_cast<u8>((c.text.size() >> 8) & 0xff));
         v.insert(v.end(),c.text.begin(),c.text.end());
         put32(v,hash(v));
         return v;
@@ -429,13 +422,17 @@ public:
     static Command decode(const std::string& packet) {
         if(packet.size()<2 || packet.front()!='#' || packet.back()!='#')
             throw std::runtime_error("VME invalid packet boundary");
-        std::vector<std::uint8_t> v;
+        std::vector<u8> v;
         std::stringstream ss(packet.substr(1,packet.size()-2));
         std::string token;
         while(std::getline(ss,token,'/')) {
             if(token.size()!=8) throw std::runtime_error("VME invalid Morse byte width");
-            std::uint8_t b=0;
-            for(char ch:token) { b=static_cast<std::uint8_t>(b<<1); if(ch=='-') b|=1; else if(ch!='.') throw std::runtime_error("VME invalid Morse symbol"); }
+            u8 b=0;
+            for(char ch:token) {
+                b=static_cast<u8>(b<<1);
+                if(ch=='-') b|=1;
+                else if(ch!='.') throw std::runtime_error("VME invalid Morse symbol");
+            }
             v.push_back(b);
         }
         constexpr std::size_t fixed=4+4+1+32+2+4;
@@ -444,12 +441,12 @@ public:
         const std::uint16_t textLen=static_cast<std::uint16_t>(v[41] | (std::uint16_t(v[42])<<8));
         if(v.size()!=fixed+textLen) throw std::runtime_error("VME packet length mismatch");
         const auto expected=get32(v,v.size()-4);
-        std::vector<std::uint8_t> payload(v.begin(),v.end()-4);
+        std::vector<u8> payload(v.begin(),v.end()-4);
         if(hash(payload)!=expected) throw std::runtime_error("VME checksum mismatch");
         Command c;
         c.sequence=get32(v,4);
         const auto rawOp=v[8];
-        if(rawOp<static_cast<std::uint8_t>(Op::Reset) || rawOp>static_cast<std::uint8_t>(Op::NanoRead))
+        if(rawOp<static_cast<u8>(Op::Reset) || rawOp>static_cast<u8>(Op::NanoRead))
             throw std::runtime_error("VME unknown opcode");
         c.op=static_cast<Op>(rawOp);
         for(unsigned i=0;i<4;++i) c.arg[i]=static_cast<i64>(get64(v,9+8*i));
@@ -469,6 +466,7 @@ public:
 };
 
 class Runtime {
+private:
     BlackBox core_;
     std::uint32_t nextSequence_=0;
     ExperienceProtocol experience_;
@@ -478,6 +476,7 @@ class Runtime {
         os << std::setprecision(std::numeric_limits<long double>::max_digits10) << x;
         return os.str();
     }
+
     Result dispatch(const Command& c) {
         Result r;
         switch(c.op) {
@@ -512,13 +511,14 @@ class Runtime {
             case Op::NanoRead: {
                 const auto length=static_cast<std::size_t>(c.arg[1]);
                 r.bytes.resize(length);
-                r.accepted=core_.nanoRead(static_cast<std::uint64_t>(c.arg[0]),r.bytes.data(),length);
+                r.accepted=core_.nanoRead(static_cast<u64>(c.arg[0]),r.bytes.data(),length);
                 if(!r.accepted) r.bytes.clear();
                 break;
             }
         }
         return r;
     }
+
     Result invoke(Command c) {
         c.sequence=nextSequence_;
         const auto wire=MorsePacket::encode(c);
@@ -539,6 +539,7 @@ class Runtime {
             throw;
         }
     }
+
 public:
     void reset() { Command c; c.op=Op::Reset; (void)invoke(c); }
     void load(i64 x) { Command c; c.op=Op::Load; c.arg[0]=x; (void)invoke(c); }
@@ -562,7 +563,7 @@ public:
     void configurePi(long double omega,long double radialScale) { Command c;c.op=Op::ConfigurePi;c.text=realText(omega)+","+realText(radialScale);(void)invoke(c); }
     void piStep(long double dt) { Command c;c.op=Op::PiStep;c.text=realText(dt);(void)invoke(c); }
     void configureNanoBytes(u32 seed,u32 scale,u32 offset) { Command c;c.op=Op::ConfigureNano;c.arg[0]=seed;c.arg[1]=scale;c.arg[2]=offset;(void)invoke(c); }
-    bool nanoRead(std::uint64_t offset,std::uint8_t* output,std::size_t length) {
+    bool nanoRead(u64 offset,u8* output,std::size_t length) {
         if(output==nullptr || length==0 || length>65536) return false;
         Command c;c.op=Op::NanoRead;c.arg[0]=static_cast<i64>(offset);c.arg[1]=static_cast<i64>(length);
         auto r=invoke(c); if(!r.accepted) return false;
@@ -646,21 +647,8 @@ public:
     }
 };
 
-// ============================================================
-// VIORBINARY + STATE + NANO-BYTES REVERSIBLE CZ CONTAINER (.cz)
-// Header (56 bytes):
-//   [0..3]   Magic: "CZF2"
-//   [4..11]  Original file size (u64 little-endian)
-//   [12..19] Chunk size used during pack (u64 little-endian)
-//   [20..23] Initial Seed Q16.16 (u32 little-endian)
-//   [24..27] Initial Scale Q16.16 (u32 little-endian)
-//   [28..31] Initial Offset Q16.16 (u32 little-endian)
-//   [32..35] Original file FNV-1a 32-bit checksum (u32 little-endian)
-//   [36..43] ViorBinary zero-bit count (u64 little-endian)
-//   [44..51] ViorBinary one-bit count (u64 little-endian)
-//   [52..55] ViorBinary final token (u32 little-endian)
-// ============================================================
 class CZFilePipeline {
+private:
     static constexpr u32 FNV_OFFSET = 2166136261u;
     static constexpr u32 FNV_PRIME  = 16777619u;
     static constexpr std::size_t DEFAULT_CHUNK = 65536;
@@ -673,21 +661,22 @@ class CZFilePipeline {
         return h;
     }
 
-    static void writeU32(std::ostream& out, u32 v) {
+    static bool writeU32(std::ostream& out, u32 v) {
         u8 b[4]{
             static_cast<u8>(v & 0xffu),
             static_cast<u8>((v >> 8) & 0xffu),
             static_cast<u8>((v >> 16) & 0xffu),
             static_cast<u8>((v >> 24) & 0xffu)
         };
-        out.write(reinterpret_cast<const char*>(b), 4);
+        return static_cast<bool>(out.write(reinterpret_cast<const char*>(b), 4));
     }
 
-    static void writeU64(std::ostream& out, u64 v) {
+    static bool writeU64(std::ostream& out, u64 v) {
         for (unsigned i = 0; i < 8; ++i) {
-            u8 byte = static_cast<u8>((v >> (8u * i)) & 0xffu);
-            out.write(reinterpret_cast<const char*>(&byte), 1);
+            const u8 byte = static_cast<u8>((v >> (8u * i)) & 0xffu);
+            if (!out.write(reinterpret_cast<const char*>(&byte), 1)) return false;
         }
+        return true;
     }
 
     static bool readU32(std::istream& in, u32& v) {
@@ -720,7 +709,11 @@ class CZFilePipeline {
         rt.configureNanoBytes(seed, scale, offset);
 
         std::vector<u8> mask(len);
-        const u64 virtOffset = (chunkIdx * 4096ULL) % (2048ULL * 512ULL - len);
+        if (len == 0) return mask;
+
+        constexpr u64 cap = 2048ULL * 512ULL;
+        const u64 span = cap - static_cast<u64>(len);
+        const u64 virtOffset = (span > 0) ? ((chunkIdx * 4096ULL) % span) : 0ULL;
         if (!rt.nanoRead(virtOffset, mask.data(), len)) {
             throw std::runtime_error("NanoRead failed during CZ chunk transform");
         }
@@ -761,6 +754,9 @@ class CZFilePipeline {
             for (std::size_t i = 0; i + 1 < payload.size(); i += 2) {
                 const std::size_t run = payload[i];
                 const u8 val = payload[i + 1];
+                if (out.size() + run > expectedLen) {
+                    throw std::runtime_error("RLE decoded length overflow");
+                }
                 out.insert(out.end(), run, val);
             }
             if (out.size() != expectedLen) {
@@ -781,7 +777,6 @@ public:
         const u64 origSize = static_cast<u64>(fin.tellg());
         fin.seekg(0, std::ios::beg);
 
-        // First streaming pass: compute original FNV-1a + ViorBinary bit-behavior signature
         Runtime sigRt;
         sigRt.reset();
         sigRt.setCZCoefficients(1, 1, 0);
@@ -813,16 +808,19 @@ public:
         rt.configurePi(1.0L, 1.0L);
 
         const auto& st = rt.inspect();
-        fout.write("CZF2", 4);
-        writeU64(fout, origSize);
-        writeU64(fout, static_cast<u64>(DEFAULT_CHUNK));
-        writeU32(fout, st.nanoSeedQ16);
-        writeU32(fout, st.nanoScaleQ16);
-        writeU32(fout, st.nanoOffsetQ16);
-        writeU32(fout, origHash);
-        writeU64(fout, viorSummary.zeroBits);
-        writeU64(fout, viorSummary.oneBits);
-        writeU32(fout, viorSummary.finalToken);
+        if (!fout.write("CZF2", 4) ||
+            !writeU64(fout, origSize) ||
+            !writeU64(fout, static_cast<u64>(DEFAULT_CHUNK)) ||
+            !writeU32(fout, st.nanoSeedQ16) ||
+            !writeU32(fout, st.nanoScaleQ16) ||
+            !writeU32(fout, st.nanoOffsetQ16) ||
+            !writeU32(fout, origHash) ||
+            !writeU64(fout, viorSummary.zeroBits) ||
+            !writeU64(fout, viorSummary.oneBits) ||
+            !writeU32(fout, viorSummary.finalToken)) {
+            std::cerr << "Failed writing .cz header\n";
+            return false;
+        }
 
         u64 chunkIdx = 0;
         ViorBinary::Summary packBits{};
@@ -840,15 +838,29 @@ public:
             }
 
             auto [mode, payload] = encodeMaskedChunk(masked);
-            writeU32(fout, static_cast<u32>(payload.size()));
             const char modeChar = static_cast<char>(mode);
-            fout.write(&modeChar, 1);
-            fout.write(reinterpret_cast<const char*>(payload.data()), static_cast<std::streamsize>(payload.size()));
+            if (!writeU32(fout, static_cast<u32>(payload.size())) ||
+                !fout.write(&modeChar, 1)) {
+                std::cerr << "Failed writing chunk metadata\n";
+                return false;
+            }
+            if (!payload.empty() &&
+                !fout.write(reinterpret_cast<const char*>(payload.data()),
+                            static_cast<std::streamsize>(payload.size()))) {
+                std::cerr << "Failed writing chunk payload\n";
+                return false;
+            }
             ++chunkIdx;
         }
 
         fout.flush();
-        const u64 czSize = static_cast<u64>(std::ifstream(outputCzPath, std::ios::binary | std::ios::ate).tellg());
+        if (!fout) {
+            std::cerr << "Error finalizing .cz output stream\n";
+            return false;
+        }
+        const u64 czSize = static_cast<u64>(fout.tellp());
+        fout.close();
+
         std::cout << "Packed '" << inputPath << "' -> '" << outputCzPath << "'\n"
                   << "Original Bytes : " << origSize << "\n"
                   << "CZ Bytes       : " << czSize << "\n"
@@ -909,6 +921,10 @@ public:
                 std::cerr << "Truncated chunk payload in .cz file\n";
                 return false;
             }
+            if (writtenTotal >= origSize) {
+                std::cerr << "Unexpected trailing chunk beyond original size\n";
+                return false;
+            }
 
             const std::size_t expectedChunkLen = static_cast<std::size_t>(
                 std::min<u64>(chunkSize64, origSize - writtenTotal));
@@ -924,8 +940,12 @@ public:
             }
 
             ViorBinary::feedChunkBits(rt, origChunk.data(), origChunk.size(), restoredVior);
-            fout.write(reinterpret_cast<const char*>(origChunk.data()),
-                       static_cast<std::streamsize>(origChunk.size()));
+            if (!origChunk.empty() &&
+                !fout.write(reinterpret_cast<const char*>(origChunk.data()),
+                            static_cast<std::streamsize>(origChunk.size()))) {
+                std::cerr << "Failed writing restored output\n";
+                return false;
+            }
             restoredHash = fnvUpdate(restoredHash, origChunk.data(), origChunk.size());
             writtenTotal += origChunk.size();
             ++chunkIdx;
@@ -948,8 +968,6 @@ public:
         return sizeOk && hashOk && viorOk;
     }
 };
-
-} // namespace vme
 
 template<class EngineType>
 static void printState(const EngineType& engine, const std::string& label) {
@@ -1008,7 +1026,7 @@ int main(int argc, char** argv) {
                 std::cerr << "Length must be in range 1..65536 bytes.\n";
                 return 2;
             }
-            std::vector<std::uint8_t> bytes(static_cast<std::size_t>(length64));
+            std::vector<u8> bytes(static_cast<std::size_t>(length64));
             if (!engine.nanoRead(offset, bytes.data(), bytes.size())) {
                 std::cerr << "Read outside virtual capacity (1 MiB).\n";
                 return 2;
